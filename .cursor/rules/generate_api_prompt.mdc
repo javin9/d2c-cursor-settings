@@ -1,0 +1,432 @@
+---
+alwaysApply: true
+---
+---
+alwaysApply: true
+---
+
+### 目标
+
+- **步骤 1**: 检测项目是否已封装 axios（优先复用现有封装）
+- **步骤 2**: 自动调用本地 YApi MCP Server 的工具 `fetch-yapi-interface` 获取接口详情
+- **步骤 3**: 基于步骤 1 的封装分析结果，智能选择文件放置位置并生成完整、可直接使用的 API 文件：
+  - **有 axios 封装时**：分析现有项目结构、导入方式、调用规范，将 API 文件生成到与封装同级或约定的 API 目录（如 `src/services/`、`src/api/`、`src/requests/` 等）
+  - **无 axios 封装时**：默认生成到 `src/api/index.ts`，同时创建独立的 axios 实例配置
+- **步骤 4**: 自动将 API 注入到业务代码中（如 `src/App.vue`），根据接口类型自动生成对应的业务逻辑
+
+### 工具调用（自动执行）
+
+请直接使用上方表单输入 `id_list`（必须是 JSON 数组字符串）。提交后将自动触发下面的工具调用，无需手动修改。
+
+```tool
+{
+  "tool": "fetch-yapi-interface",
+  "input": {
+    "id_list": {{id_list}}
+  }
+}
+```
+
+### 数据字段解释（严格遵守）
+
+- **\_id**: 接口 ID（用于注释）
+- **title**: 接口中文名称 → 转为 camelCase 作为函数名（如 “用户登录” → `login`）
+- **query_path**: 完整请求路径（如 `"/api/v1/user/login"`），直接作为 `url` 使用
+- **method**: `GET` / `POST` / `PUT` / `DELETE`（大写）
+- **tag**: 接口标签数组，取数组第一项为 `baseURL`
+- **req_query**: `GET` 查询参数数组
+- **req_params**: 路径参数数组（如 `[{ name: "id" }]`）
+- **req_body_type**: `json` | `raw` | `form-data` | `x-www-form-urlencoded`
+- **req_body_form**: `form-data` 字段
+- **req_headers**: 自定义请求头
+- **res_body**: 响应体 JSON 字符串（必须先 `JSON.parse` 再转类型）
+- **res_body_type**: 通常为 `"json"`
+- **markdown**: 接口的 markdown 描述
+- **interface_url**: 接口详情页面地址
+
+根据 `query_path` 生成命名：
+
+- **InterfaceName**：例如 `GET /api/v1/user/login` → `IApiV1UserLoginGET`
+- **camelCaseInterfaceName**：例如 `POST /api/v1/user/login` → `apiV1UserLoginPOST`
+
+### 代码生成规则
+
+在生成 `src/api/index.ts` 前必须执行“封装识别”，并据此选择生成策略：
+
+1. **封装识别与文件放置策略**（从上到下命中即停）：
+
+   - **优先查找全局封装**：`src/**/request.(ts|js)`、`src/**/http.(ts|js)`、`src/**/api.(ts|js)`
+     - 若存在，复用其导出（如 `request`、`get`、`post`、`put`），沿用其拦截器、返回值格式、超时与 header 处理方式
+     - **文件放置**：分析现有 API 文件的组织方式（如 `src/api/`、`src/services/`、`src/requests/`），按相同结构放置
+     - **命名约定**：检查现有 API 文件命名模式（如按模块分文件 `userApi.ts`、`orderApi.ts` 或统一 `index.ts`）
+   - **查找局部封装**：与业务同层或上层目录下的封装，如 `src/**/request.(ts|js)`
+     - 如存在，复用该封装并保持其约定（如返回 `res.data`、错误提示、token 注入等）
+     - **文件放置**：在封装同级目录创建或扩展现有 API 文件
+   - **检查现有 API 组织结构**：
+     - 扫描 `src/api/`、`src/services/`、`src/requests/` 等目录
+     - 分析现有文件命名和导出方式（模块化 vs 统一导出）
+     - 按现有规范新增或扩展文件
+   - **默认策略**：如果上述都不存在，创建 `src/api/index.ts` 并使用默认 axios 配置
+
+2. **封装复用规则**：
+
+   - **导入路径**：保持与项目现有用法一致（优先使用已存在文件中的别名路径，如 `@/**/request`，若无则使用相对路径）。
+   - **调用方式**：若封装导出了 `get/post/put/request`，则直接调用对应方法；若仅有实例（如 `instance` 或 `request`），使用与封装一致的返回值结构。
+   - **返回值约束**：如果封装已在响应拦截器中返回 `res.data`，生成的 Response 类型应匹配 `res.data` 的结构；若封装保留完整 AxiosResponse，则类型应匹配 `AxiosResponse<{InterfaceName}Response>`。
+   - **拦截器/headers**：保持封装原有的 token、headers、重试或提示逻辑，不在生成文件中二次配置。
+
+3. **默认模板**：仅在未找到任何封装时才创建新的 axios 实例（保持原有默认配置逻辑）。
+
+以下为完整文件模板与生成要求（先看封装识别结果选择模板）。
+
+#### 复用已有 axios 封装时的模板（优先）
+
+```ts
+// 优先沿用已存在封装（例：全局封装位于 src/**/request.ts）
+// 请根据真实导出调整导入方式：可能是默认导出对象 { get, post, put, request }，也可能是命名导出
+import request, { get, post, put } from "@/**/request.(ts|js)"; // 若未配置路径别名则使用相对路径
+
+/**
+ * @name:{title}
+ * @method:{method}
+ * @path:{query_path}
+ * @description:{markdown}
+ * @yapi_url:{interface_url}
+ */
+// GET 示例：若封装导出 get
+export const {camelCaseInterfaceName} = (params: {InterfaceName}Params): Promise<{InterfaceName}Response> => {
+  return get<{InterfaceName}Response>("{query_path}", params);
+};
+
+/**
+ * @name:{title}
+ * @method:{method}
+ * @path:{query_path}
+ * @description:{markdown}
+ * @yapi_url:{interface_url}
+ */
+// POST 示例：若封装导出 post
+export const {camelCaseInterfaceName} = (data: {InterfaceName}Data): Promise<{InterfaceName}Response> => {
+  return post<{InterfaceName}Response>("{query_path}", data, {
+    headers: {
+      "Content-Type": "{contentType}", // 按请求类型自动填充
+    },
+  });
+};
+```
+
+#### 默认模板（无封装时才使用）
+
+```ts
+import axios from "axios";
+
+// 统一请求实例（可在此配置拦截器、token 等）
+const request = axios.create({
+  baseURL: "{tag[0]}",
+  timeout: 10000,
+});
+
+request.interceptors.request.use((config) => {
+  return config;
+});
+
+request.interceptors.response.use((response) => {
+  if (response.data.code !== 0) {
+    throw new Error(response.data.message);
+  }
+  return response.data;
+});
+
+/**
+ * 以下全部由 YApi MCP Server 自动生成
+ * 生成时间：{{当前日期时间}}
+ */
+
+
+{{在此处为 list 中的每条接口生成以下完整代码块，每条之间空两行分隔}}
+
+
+
+
+// 如果是 GET：入参从 req_query 推导，req_params 中的路径参数为必填
+// {{title}} 请求参数
+export interface {InterfaceName}Params {
+  // GET：从 req_query 生成
+  // req_params 中的路径参数必须必填（不加 ?）
+  // 每个字段使用 desc 作为注释
+}
+
+
+// 如果是 POST：入参从 req_body_other（或示例）推导
+// {{title}} 请求参数
+export interface {InterfaceName}Data {
+  // POST 接口，优先从请求示例推导，否则为空接口
+  // 从 req_body_other 生成
+  // 每个字段使用 desc 作为注释
+}
+
+// {{title}} 响应参数
+export interface {InterfaceName}Response {
+  // 从 JSON.parse(res_body) 自动生成的精准 TypeScript 类型
+  // 若 res_body 为空或解析失败 → 使用 any 并加注释：// YApi 未配置响应示例
+}
+
+// 如果是 GET：
+/**
+ * @name:{title}
+ * @method:{method}
+ * @path:{query_path}
+ * @description:{markdown}
+ * @yapi_url:{interface_url}
+ */
+export const {camelCaseInterfaceName} = (params: {InterfaceName}Params): Promise<{InterfaceName}Response> => {
+  return request({
+    url: "{query_path}",
+    method: "{method.toLowerCase()}",
+    params,
+  });
+};
+
+// 如果是 POST：
+/**
+ * @name:{title}
+ * @method:{method}
+ * @path:{query_path}
+ * @description:{markdown}
+ * @yapi_url:{interface_url}
+ */
+export const {camelCaseInterfaceName} = (data: {InterfaceName}Data): Promise<{InterfaceName}Response> => {
+  return request({
+    url: "{query_path}",
+    method: "{method.toLowerCase()}",
+    data,
+  });
+};
+
+// {{空两行继续下一条接口}}
+```
+
+### 输出要求（必须）
+
+- **文件路径智能选择**：
+  - **有封装**：根据现有项目结构放置到合适位置（如 `src/services/api.ts`、`src/api/userApi.ts`、`src/requests/index.ts` 等）
+  - **无封装**：默认生成到 `src/api/index.ts`
+- **命名规范**：
+  - 函数名：`camelCaseInterfaceName`（如 "获取用户信息" → `getUserInfo`，"登录" → `login`）
+  - 类型名：`{InterfaceName}Response`（如 `IApiV1UserLoginResponse`）
+- **技术支持**：支持路径参数、query、json、form-data、x-www-form-urlencoded、自定义 headers
+- **Content-Type 处理**：自动处理逻辑必须正确
+- **项目集成**：确保生成的代码能够与现有项目无缝集成，遵循现有的代码规范和架构约定
+  提示：提交表单后会先执行上面的工具调用，拿到 `structuredContent.list` 后再据此生成整个文件。
+
+### 执行流程（必须按顺序执行）
+
+1. **识别 axios 封装与项目结构**：按"封装识别与文件放置策略"分析现有封装、API 组织方式、命名规范
+2. **调用工具获取接口数据**：使用 `fetch-yapi-interface` 工具获取接口详情
+3. **智能生成 API 文件**：
+   - 根据步骤 1 的分析结果，选择合适的文件路径和命名方式
+   - 按现有项目规范生成完整、可直接使用的 API 文件
+   - 确保与现有代码架构和导入方式完全兼容
+4. **自动注入业务代码**（**必须执行**）：
+   - 读取 `src/App.vue`（或项目主组件文件）
+   - 根据接口类型（GET/POST）自动生成对应的业务逻辑代码
+   - 更新 `<script setup>` 部分：添加导入、ref 定义、处理函数
+   - 更新 `<template>` 部分：更新表单绑定、按钮事件、列表渲染
+   - 智能合并：如果已有相关代码，智能合并而不是完全覆盖
+5. **验证代码**：检查生成的代码是否有语法错误，确保可以正常运行
+
+### 步骤 4：自动将 API 注入到业务代码中
+
+生成 `src/api/index.ts` 后，**必须自动更新业务代码文件**（如 `src/App.vue`），将接口调用注入到对应的业务场景中。
+
+#### 业务代码注入规则
+
+1. **读取目标业务文件**：优先查找 `src/App.vue`，如果不存在则查找 `src/main.ts` 或 `src/App.tsx`
+2. **接口类型识别**：
+
+   - **GET 接口**：通常用于获取数据，应在 `onMounted` 或数据加载函数中调用
+   - **POST/PUT/DELETE 接口**：通常用于提交数据，应在事件处理函数中调用（如按钮点击、表单提交）
+
+3. **接口与业务场景匹配规则**：
+
+   - 根据 `query_path` 和 `title` 识别业务场景：
+     - 包含 `articles`、`article`、`list` → 文章列表相关
+     - 包含 `create`、`add`、`post` → 创建/新增操作
+     - 包含 `update`、`edit`、`put` → 更新操作
+     - 包含 `delete`、`remove` → 删除操作
+     - 包含 `login`、`auth` → 登录认证
+     - 包含 `tags`、`tag` → 标签相关
+
+4. **Vue 组件自动更新模板**：
+
+**对于 GET 接口（获取数据）**：
+
+```vue
+<script setup lang="ts">
+import { ref, onMounted } from "vue";
+import { {camelCaseInterfaceName}, type {InterfaceName}Response } from "./api/index";
+
+// 根据响应数据结构定义 ref
+const {dataField} = ref<{InterfaceName}Response["data"]["{dataField}"]>([]);
+
+const handleGet{FunctionName} = async () => {
+  try {
+    const response = await {camelCaseInterfaceName}({
+      // 根据 req_query 生成参数，必填参数必须有值
+    });
+    {dataField}.value = response.data.{dataField};
+  } catch (error) {
+    console.error("获取{title}失败:", error);
+  }
+};
+
+onMounted(async () => {
+  await handleGet{FunctionName}();
+});
+</script>
+```
+
+**对于 POST 接口（创建/提交数据）**：
+
+```vue
+<script setup lang="ts">
+import { ref } from "vue";
+import { {camelCaseInterfaceName}, type {InterfaceName}Data, type {InterfaceName}Response } from "./api/index";
+
+// 根据请求数据结构定义表单 ref
+const formData = ref<Partial<{InterfaceName}Data["{dataField}"]>>({
+  // 根据 req_body 结构初始化表单字段
+});
+
+const handleCreate{FunctionName} = async () => {
+  // 表单验证
+  if (!formData.value.{requiredField}) {
+    alert("请填写必填字段");
+    return;
+  }
+  try {
+    const data: {InterfaceName}Data = {
+      {dataField}: formData.value as {InterfaceName}Data["{dataField}"]
+    };
+    await {camelCaseInterfaceName}(data);
+    // 成功后清空表单或刷新列表
+    formData.value = {};
+    // 如果有对应的 GET 接口，调用刷新
+    // await handleGet{RelatedFunctionName}();
+  } catch (error) {
+    console.error("创建{title}失败:", error);
+  }
+};
+</script>
+
+<template>
+  <!-- 表单部分 -->
+  <div>
+    <input v-model="formData.{field}" placeholder="{fieldDesc}" />
+    <button @click="handleCreate{FunctionName}">创建{title}</button>
+  </div>
+</template>
+```
+
+#### 自动更新业务代码的步骤
+
+1. **读取现有业务文件**：读取 `src/App.vue`（或目标文件）
+2. **分析现有代码结构**：
+   - 查找已有的 `ref`、`reactive` 定义
+   - 查找已有的 `onMounted`、事件处理函数
+   - 查找模板中的表单、列表等 UI 元素
+3. **智能合并代码**：
+   - 如果已有相同的 API 调用，跳过或更新
+   - 如果已有相关的 ref 定义，复用或扩展
+   - 如果已有相关的 UI 元素，更新绑定的事件处理函数
+4. **更新模板部分**：
+   - GET 接口：更新列表渲染部分，使用正确的数据字段和 key
+   - POST 接口：更新表单部分，绑定正确的 v-model 和事件处理函数
+
+#### 具体实现示例
+
+**示例 1：GET 接口注入**
+
+- 接口：`GET /api/articles` → `apiArticlesGET`
+- 自动生成：
+
+  ```vue
+  <script setup lang="ts">
+  import { ref, onMounted } from "vue";
+  import { apiArticlesGET, type IApiArticlesGETResponse } from "./api/index";
+
+  const articles = ref<IApiArticlesGETResponse["data"]["articles"]>([]);
+
+  const handleGetArticles = async () => {
+    try {
+      const response = await apiArticlesGET({
+        limit: 20,
+        offset: 0,
+      });
+      articles.value = response.data.articles;
+    } catch (error) {
+      console.error("获取文章列表失败:", error);
+    }
+  };
+
+  onMounted(async () => {
+    await handleGetArticles();
+  });
+  </script>
+  ```
+
+**示例 2：POST 接口注入**
+
+- 接口：`POST /api/articles` → `apiArticlesPOST`
+- 自动生成：
+
+  ```vue
+  <script setup lang="ts">
+  import { ref } from "vue";
+  import { apiArticlesPOST, type IApiArticlesPOSTData } from "./api/index";
+
+  const title = ref<string>("");
+  const content = ref<string>("");
+
+  const handleCreateArticle = async () => {
+    if (!title.value || !content.value) {
+      alert("请输入标题和内容");
+      return;
+    }
+    try {
+      const data: IApiArticlesPOSTData = {
+        article: {
+          title: title.value,
+          body: content.value,
+          description: content.value.substring(0, 100),
+          tagList: [],
+        },
+      };
+      await apiArticlesPOST(data);
+      title.value = "";
+      content.value = "";
+      // 如果有获取列表的函数，调用刷新
+      // await handleGetArticles();
+    } catch (error) {
+      console.error("创建文章失败:", error);
+    }
+  };
+  </script>
+
+  <template>
+    <div>
+      <input type="text" v-model="title" placeholder="标题" />
+      <textarea v-model="content" placeholder="内容"></textarea>
+      <button @click="handleCreateArticle">创建文章</button>
+    </div>
+  </template>
+  ```
+
+#### 注意事项
+
+- **智能匹配**：根据接口路径和名称自动匹配业务场景，避免重复代码
+- **类型安全**：使用 TypeScript 类型确保类型安全
+- **错误处理**：所有 API 调用都包含 try-catch 错误处理
+- **代码合并**：如果业务文件已存在相关代码，智能合并而不是覆盖
+- **相对路径**：使用相对路径导入 API：`import { ... } from "./api/index"`
+- **函数命名**：处理函数使用 `handle` 前缀，如 `handleGetArticles`、`handleCreateArticle`
